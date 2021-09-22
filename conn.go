@@ -213,8 +213,12 @@ func (c *conn) killQuery(req *http.Request, args []driver.Value) error {
 	}
 	if body != nil {
 		// Drain body to enable connection reuse
-		_, _ = io.Copy(ioutil.Discard, body)
-		body.Close()
+		if _, err = io.Copy(ioutil.Discard, body); err != nil {
+			c.log("error in killQuery body copy: ", err)
+		}
+		if err = body.Close(); err != nil {
+			c.log("error in killQuery body close: ", err)
+		}
 	}
 	return nil
 }
@@ -232,7 +236,7 @@ func (c *conn) query(ctx context.Context, query string, args []driver.Value) (dr
 		if _, ok := err.(*Error); !ok && err != driver.ErrBadConn {
 			killErr := c.killQuery(req, args)
 			if killErr != nil {
-				c.log("error from killQuery", killErr)
+				c.log("error from killQuery: ", killErr)
 			}
 		}
 		return nil, err
@@ -250,12 +254,19 @@ func (c *conn) exec(ctx context.Context, query string, args []driver.Value) (dri
 		return nil, err
 	}
 	body, err := c.doRequest(ctx, req)
+	if err != nil {
+		return nil, err
+	}
 	if body != nil {
 		// Drain body to enable connection reuse
-		_, _ = io.Copy(ioutil.Discard, body)
-		body.Close()
+		if _, err = io.Copy(ioutil.Discard, body); err != nil {
+			c.log("error in exec body copy: ", err)
+		}
+		if err = body.Close(); err != nil {
+			c.log("error in exec body close: ", err)
+		}
 	}
-	return emptyResult, err
+	return emptyResult, nil
 }
 
 func (c *conn) doRequest(ctx context.Context, req *http.Request) (io.ReadCloser, error) {
@@ -297,14 +308,21 @@ func (c *conn) buildRequest(ctx context.Context, query string, params []driver.V
 
 	bodyReader, bodyWriter := io.Pipe()
 	go func() {
+		var e error
 		if c.useGzipCompression {
 			gz := gzip.NewWriter(bodyWriter)
-			_, _ = gz.Write([]byte(query))
-			_ = gz.Close()
-			_ = bodyWriter.Close()
+			_, e = gz.Write([]byte(query))
+			if e != nil {
+				c.log("error in buildRequest gz.Write: ", e)
+			}
+			e = gz.Close()
+			e = bodyWriter.CloseWithError(e)
 		} else {
-			_, _ = bodyWriter.Write([]byte(query))
-			_ = bodyWriter.Close()
+			_, e = bodyWriter.Write([]byte(query))
+			e = bodyWriter.CloseWithError(e)
+		}
+		if e != nil {
+			c.log("error in buildRequest writer close: ", e)
 		}
 	}()
 	c.log("query: ", query)
